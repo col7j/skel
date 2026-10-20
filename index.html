@@ -19,6 +19,7 @@
   color-scheme:light;
 }
 *{box-sizing:border-box}
+[hidden]{display:none!important}
 body{background:var(--bg);color:var(--ink);font-family:var(--font);font-size:16px;margin:0;
   padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:28px 40px}
 .wrap{max-width:1040px;margin:0 auto;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,400px);gap:32px;align-items:start}
@@ -83,7 +84,7 @@ input:focus,textarea:focus,button:focus-visible{outline:2px solid var(--accent);
     </div>
 
     <div class="field">
-      <label for="phone">رقم واتساب المدعو <span class="hint">(اختياري، مثال 0501234567)</span></label>
+      <label for="phone">رقم واتساب المدعو <span class="hint">(اختياري، للإرسال من الكمبيوتر فقط)</span></label>
       <input id="phone" inputmode="tel" dir="ltr" placeholder="05xxxxxxxx">
     </div>
 
@@ -93,15 +94,15 @@ input:focus,textarea:focus,button:focus-visible{outline:2px solid var(--accent);
     </div>
 
     <div class="actions">
-      <button type="button" class="btn btn-save" id="save">حفظ الدعوة PDF</button>
-      <a class="btn btn-wa" id="wa" href="https://wa.me/" target="_blank" rel="noopener">فتح واتساب للإرسال</a>
+      <button type="button" class="btn btn-wa" id="send">إرسال الدعوة عبر واتساب</button>
+      <button type="button" class="btn btn-save" id="save">تنزيل PDF فقط</button>
     </div>
+    <a class="btn btn-wa" id="wa" href="https://wa.me/" target="_blank" rel="noopener" hidden>فتح محادثة واتساب</a>
     <div class="status" id="status" role="status"></div>
 
     <ol class="steps">
-      <li>اضغط «حفظ الدعوة PDF»، وفي الجوال اختر واتساب من قائمة المشاركة مباشرة.</li>
-      <li>اضغط «فتح واتساب للإرسال»، فتفتح محادثة المدعو مع نص الرسالة جاهزاً.</li>
-      <li>أرفق ملف PDF في المحادثة وأرسله.</li>
+      <li><b>من الجوال:</b> اضغط «إرسال الدعوة عبر واتساب»، اختر واتساب ثم المدعو، فيُرسل ملف PDF مع الرسالة.</li>
+      <li><b>من الكمبيوتر:</b> ينزل ملف PDF ويظهر زر «فتح محادثة واتساب»، افتحها وأرفق الملف.</li>
     </ol>
   </form>
 
@@ -180,34 +181,51 @@ function makePdf(){
   return pdf.output('blob');
 }
 
-async function save(){
-  if (!lastBlob){ setStatus('الدعوة لم تجهز بعد، حاول بعد لحظة.','err'); return; }
-  let pdfBlob;
-  try { pdfBlob = makePdf(); } catch(e){ setStatus('تعذر إنشاء ملف PDF، حدّث الصفحة وحاول مرة أخرى.','err'); return; }
-  const file = new File([pdfBlob], fileName(), {type:'application/pdf'});
-  // 1) Native share sheet (phones, when hosted outside a sandbox)
-  try {
-    if (navigator.canShare && navigator.canShare({files:[file]})){
-      await navigator.share({files:[file], text:$('msg').value});
-      setStatus('تمت المشاركة.','ok'); return;
-    }
-  } catch(e){ if (e && e.name === 'AbortError') return; }
-  // 2) Claude artifact download capability
+function buildPdf(){
+  if (!lastBlob){ setStatus('الدعوة لم تجهز بعد، حاول بعد لحظة.','err'); return null; }
+  try { return makePdf(); } catch(e){ setStatus('تعذر إنشاء ملف PDF، حدّث الصفحة وحاول مرة أخرى.','err'); return null; }
+}
+
+// Returns true when the file was handed to the viewer
+async function download(pdfBlob){
+  // Claude artifact download capability
   try {
     const dl = window.claude && await window.claude.use('downloads');
-    if (dl){
-      await dl.save({filename:fileName(), data:pdfBlob});
-      setStatus('تم حفظ الدعوة. الآن افتح واتساب وأرفقها.','ok'); return;
-    }
+    if (dl){ await dl.save({filename:fileName(), data:pdfBlob}); return true; }
   } catch(e){
-    if (e && e.code === 'declined'){ setStatus('تم إلغاء الحفظ.'); return; }
+    if (e && e.code === 'declined'){ setStatus('تم إلغاء التنزيل.'); return false; }
   }
-  // 3) Plain browser download
+  // Plain browser download
   try {
     const a = document.createElement('a'); a.href = URL.createObjectURL(pdfBlob); a.download = fileName();
     document.body.appendChild(a); a.click(); a.remove();
-    setStatus('تم تنزيل ملف PDF. الآن افتح واتساب وأرفقه.','ok');
-  } catch(e){ setStatus('تعذر التنزيل، حاول من متصفح آخر.','err'); }
+    return true;
+  } catch(e){ setStatus('تعذر التنزيل، حاول من متصفح آخر.','err'); return false; }
+}
+
+async function send(){
+  const pdfBlob = buildPdf(); if (!pdfBlob) return;
+  const file = new File([pdfBlob], fileName(), {type:'application/pdf'});
+  const text = $('msg').value;
+  // Phones: share sheet sends the PDF itself to WhatsApp
+  if (navigator.canShare && navigator.canShare({files:[file]})){
+    try { navigator.clipboard && navigator.clipboard.writeText(text).catch(()=>{}); } catch(e){}
+    try {
+      await navigator.share({files:[file], text});
+      setStatus('تم تجهيز الإرسال. إن لم يظهر نص الرسالة مع الملف فهو منسوخ، الصقه في المحادثة.','ok');
+      return;
+    } catch(e){ if (e && e.name === 'AbortError'){ setStatus('تم إلغاء الإرسال.'); return; } }
+  }
+  // Computers: download the PDF, then open the chat to attach it
+  if (await download(pdfBlob)){
+    $('wa').hidden = false;
+    setStatus('تم تنزيل ملف PDF. اضغط «فتح محادثة واتساب» ثم أرفق الملف وأرسله.','ok');
+  }
+}
+
+async function save(){
+  const pdfBlob = buildPdf(); if (!pdfBlob) return;
+  if (await download(pdfBlob)) setStatus('تم تنزيل ملف PDF.','ok');
 }
 
 document.querySelectorAll('.chip').forEach(c => c.addEventListener('click', () => {
@@ -217,6 +235,7 @@ document.querySelectorAll('.chip').forEach(c => c.addEventListener('click', () =
 ['name','title','phone'].forEach(id => $(id).addEventListener('input', refresh));
 $('msg').addEventListener('input', () => { msgTouched = true; updateWa(); });
 $('save').addEventListener('click', save);
+$('send').addEventListener('click', send);
 $('form').addEventListener('submit', e => e.preventDefault());
 
 bg.onload = async () => {
